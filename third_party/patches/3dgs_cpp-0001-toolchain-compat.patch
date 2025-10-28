@@ -1,0 +1,70 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1eb2b73..9deb084 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -51,7 +51,7 @@ FetchContent_MakeAvailable(libenvpp)
+ 
+ FetchContent_Declare(spdlog
+         GIT_REPOSITORY https://github.com/gabime/spdlog.git
+-        GIT_TAG v1.13.0
++        GIT_TAG v1.15.3
+ )
+ FetchContent_GetProperties(spdlog)
+ if (NOT spdlog_POPULATED)
+diff --git a/src/vulkan/Swapchain.cpp b/src/vulkan/Swapchain.cpp
+index 5bac09e..30b0ace 100644
+--- a/src/vulkan/Swapchain.cpp
++++ b/src/vulkan/Swapchain.cpp
+@@ -2,7 +2,7 @@
+ 
+ #include "glm/glm.hpp"
+ #include "spdlog/spdlog.h"
+-#include <vk_enum_string_helper.h>
++#include <vulkan/vk_enum_string_helper.h>
+ 
+ Swapchain::Swapchain(const std::shared_ptr<VulkanContext>& context, const std::shared_ptr<Window>& window,
+                      bool immediate) : context(context), window(window), immediate(immediate) {
+diff --git a/src/vulkan/VulkanContext.cpp b/src/vulkan/VulkanContext.cpp
+index 2494648..5833749 100644
+--- a/src/vulkan/VulkanContext.cpp
++++ b/src/vulkan/VulkanContext.cpp
+@@ -142,7 +142,7 @@ void VulkanContext::selectPhysicalDevice(std::optional<uint8_t> id, std::optiona
+     spdlog::info("Available physical devices:");
+     int ind = 0;
+     for (auto& device: devices) {
+-        spdlog::info("[{}] {}", ind++, device.getProperties().deviceName);
++        spdlog::info("[{}] {}", ind++, device.getProperties().deviceName.data());
+     }
+ 
+     if (surface.has_value()) {
+@@ -154,7 +154,7 @@ void VulkanContext::selectPhysicalDevice(std::optional<uint8_t> id, std::optiona
+             throw std::runtime_error("Invalid physical device id");
+         }
+         physicalDevice = devices[id.value()];
+-        spdlog::info("Selected physical device (by index): {}", physicalDevice.getProperties().deviceName);
++        spdlog::info("Selected physical device (by index): {}", physicalDevice.getProperties().deviceName.data());
+         return;
+     }
+ 
+@@ -174,7 +174,7 @@ void VulkanContext::selectPhysicalDevice(std::optional<uint8_t> id, std::optiona
+         }
+     }
+ 
+-    spdlog::info("Selected physical device (automatically): {}", physicalDevice.getProperties().deviceName);
++    spdlog::info("Selected physical device (automatically): {}", physicalDevice.getProperties().deviceName.data());
+ }
+ 
+ VulkanContext::QueueFamilyIndices VulkanContext::findQueueFamilies() {
+diff --git a/src/vulkan/VulkanContext.h b/src/vulkan/VulkanContext.h
+index e71bbf2..9806b10 100644
+--- a/src/vulkan/VulkanContext.h
++++ b/src/vulkan/VulkanContext.h
+@@ -1,7 +1,7 @@
+ #ifndef VULKANCONTEXT_H
+ #define VULKANCONTEXT_H
+ #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
+-#define VULKAN_HPP_TYPESAFE_CONVERSION
++#define VULKAN_HPP_TYPESAFE_CONVERSION 1
+ 
+ #define FRAMES_IN_FLIGHT 1
+ 
