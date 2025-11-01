@@ -1,0 +1,192 @@
+diff --git a/include/3dgs/3dgs.h b/include/3dgs/3dgs.h
+index a4d711e..fd70505 100644
+--- a/include/3dgs/3dgs.h
++++ b/include/3dgs/3dgs.h
+@@ -4,6 +4,8 @@
+ #include <optional>
+ #include <string>
+ #include <memory>
++#include <functional>
++#include <cstdint>
+ 
+ class Window;
+ class Renderer;
+@@ -16,6 +18,11 @@ public:
+         bool immediateSwapchain = false;
+         std::string scene;
+ 
++        // if set, used instead of loading the scene file. fillVertices gets a buffer of
++        // numVertices * 60 floats (position, scale/opacity, rotation, 48 SH coefficients)
++        uint32_t numVertices = 0;
++        std::function<void(float*)> fillVertices;
++
+         float fov = 45.0f;
+         float near = 0.2f;
+         float far = 1000.0f;
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 36e817f..4476934 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -28,7 +28,7 @@ add_library(3dgs_cpp STATIC
+ 
+ target_include_directories(3dgs_cpp
+         PUBLIC
+-        ${CMAKE_SOURCE_DIR}/include/3dgs
++        ${3dgs_cpp_root_SOURCE_DIR}/include/3dgs
+         PRIVATE
+         third_party
+         ${Vulkan_INCLUDE_DIRS}
+@@ -37,7 +37,7 @@ target_include_directories(3dgs_cpp
+         ${imgui_SOURCE_DIR}
+         ${imgui_SOURCE_DIR}/backends
+         ${spdlog_SOURCE_DIR}/include
+-        ${CMAKE_BINARY_DIR}/shaders
++        ${3dgs_cpp_root_BINARY_DIR}/shaders
+ )
+ 
+ add_dependencies(3dgs_cpp shaders)
+diff --git a/src/GSScene.cpp b/src/GSScene.cpp
+index 6fdf1d5..42f4381 100644
+--- a/src/GSScene.cpp
++++ b/src/GSScene.cpp
+@@ -26,6 +26,16 @@ struct VertexStorage {
+ void GSScene::load(const std::shared_ptr<VulkanContext>&context) {
+     auto startTime = std::chrono::high_resolution_clock::now();
+ 
++    if (fillVertices) {
++        static_assert(sizeof(Vertex) == 60 * sizeof(float));
++        vertexBuffer = createBuffer(context, header.numVertices * sizeof(Vertex));
++        auto stagingBuffer = Buffer::staging(context, header.numVertices * sizeof(Vertex));
++        fillVertices(static_cast<float *>(stagingBuffer->allocation_info.pMappedData));
++        vertexBuffer->uploadFrom(stagingBuffer);
++        precomputeCov3D(context);
++        return;
++    }
++
+     std::ifstream plyFile(filename, std::ios::binary);
+     loadPlyHeader(plyFile);
+ 
+diff --git a/src/GSScene.h b/src/GSScene.h
+index 32b40f3..4d7eac8 100644
+--- a/src/GSScene.h
++++ b/src/GSScene.h
+@@ -2,6 +2,7 @@
+ #define GSSCENE_H
+ 
+ #include <filesystem>
++#include <functional>
+ #include <iostream>
+ #include <glm/glm.hpp>
+ #include "vulkan/VulkanContext.h"
+@@ -22,6 +23,11 @@ struct PlyHeader {
+ 
+ class GSScene {
+ public:
++    GSScene(uint32_t numVertices, std::function<void(float*)> fillVertices)
++        : fillVertices(std::move(fillVertices)) {
++        header.numVertices = static_cast<int>(numVertices);
++    }
++
+     explicit GSScene(const std::string& filename)
+         : filename(filename) {
+         // check if file exists
+@@ -54,6 +60,7 @@ public:
+ private:
+     std::string filename;
+     PlyHeader header;
++    std::function<void(float*)> fillVertices;
+ 
+     std::shared_ptr<Buffer> createStagingBuffer(const std::shared_ptr<VulkanContext>& sharedPtr, unsigned long i);
+ 
+diff --git a/src/Renderer.cpp b/src/Renderer.cpp
+index fe7e4e4..ed3edde 100644
+--- a/src/Renderer.cpp
++++ b/src/Renderer.cpp
+@@ -156,7 +156,11 @@ void Renderer::initializeVulkan() {
+ 
+ void Renderer::loadSceneToGPU() {
+     spdlog::debug("Loading scene to GPU");
+-    scene = std::make_shared<GSScene>(configuration.scene);
++    if (configuration.fillVertices) {
++        scene = std::make_shared<GSScene>(configuration.numVertices, configuration.fillVertices);
++    } else {
++        scene = std::make_shared<GSScene>(configuration.scene);
++    }
+     scene->load(context);
+ 
+     // reset descriptor pool
+@@ -433,14 +437,31 @@ void Renderer::run() {
+ 
+         draw();
+ 
++        fpsCounter++;
+         auto now = std::chrono::high_resolution_clock::now();
+         auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastFpsTime).count();
+-        if (diff > 1000) {
+-            spdlog::debug("FPS: {}", fpsCounter);
++        if (diff >= 1000) {
++            float fps = fpsCounter * 1000.0f / diff;
++            float frameMs = static_cast<float>(diff) / fpsCounter;
++
++            const VkPhysicalDeviceMemoryProperties* memProps;
++            vmaGetMemoryProperties(context->allocator, &memProps);
++            VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
++            vmaGetHeapBudgets(context->allocator, budgets);
++            VkDeviceSize gpuBytes = 0;
++            for (uint32_t i = 0; i < memProps->memoryHeapCount; i++) {
++                gpuBytes += budgets[i].statistics.allocationBytes;
++            }
++            float gpuMb = gpuBytes / (1024.0f * 1024.0f);
++
++            spdlog::info("FPS: {:.1f}  frame time: {:.2f} ms  GPU memory: {:.1f} MB", fps, frameMs, gpuMb);
++            if (configuration.enableGui) {
++                guiManager.pushTextMetric("FPS", fps);
++                guiManager.pushTextMetric("frame time (ms)", frameMs);
++                guiManager.pushTextMetric("GPU memory (MB)", gpuMb);
++            }
+             fpsCounter = 0;
+             lastFpsTime = now;
+-        } else {
+-            fpsCounter++;
+         }
+ 
+         retrieveTimestamps();
+diff --git a/src/shaders/CMakeLists.txt b/src/shaders/CMakeLists.txt
+index 3fc4346..33c6586 100644
+--- a/src/shaders/CMakeLists.txt
++++ b/src/shaders/CMakeLists.txt
+@@ -1,7 +1,7 @@
+ cmake_minimum_required(VERSION 3.26)
+ project(shaders)
+ 
+-add_executable(embedfile ${CMAKE_SOURCE_DIR}/cmake/embedfile.c)
++add_executable(embedfile ${3dgs_cpp_root_SOURCE_DIR}/cmake/embedfile.c)
+ 
+ file(GLOB_RECURSE GLSL_SOURCE_FILES
+         "*.frag"
+@@ -20,8 +20,8 @@ if (APPLE)
+     list(APPEND GLSLC_DEFINE "-DAPPLE")
+ endif ()
+ 
+-set(SHADER_HEADER "${CMAKE_BINARY_DIR}/shaders/shaders.h")
+-set(XCODE_SHADER "${CMAKE_SOURCE_DIR}/apps/apple/VulkanSplatting/shaders.h")
++set(SHADER_HEADER "${3dgs_cpp_root_BINARY_DIR}/shaders/shaders.h")
++set(XCODE_SHADER "${3dgs_cpp_root_SOURCE_DIR}/apps/apple/VulkanSplatting/shaders.h")
+ 
+ message(STATUS "Shader header file: ${SHADER_HEADER}")
+ 
+@@ -36,11 +36,11 @@ foreach (GLSL ${GLSL_SOURCE_FILES})
+     get_filename_component(FILE_NAME ${GLSL} NAME_WE)
+     string(TOUPPER ${FILE_NAME} FILE_NAME_UPPER)
+     set(FILE_NAME_UPPER "SPV_${FILE_NAME_UPPER}")
+-    set(SPIRV "${CMAKE_BINARY_DIR}/shaders/${FILE_NAME}.spv")
+-    SET(TEMP_HEADER "${CMAKE_BINARY_DIR}/shaders/${FILE_NAME}.h")
++    set(SPIRV "${3dgs_cpp_root_BINARY_DIR}/shaders/${FILE_NAME}.spv")
++    SET(TEMP_HEADER "${3dgs_cpp_root_BINARY_DIR}/shaders/${FILE_NAME}.h")
+     add_custom_command(
+             OUTPUT ${SPIRV}
+-            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/shaders/"
++            COMMAND ${CMAKE_COMMAND} -E make_directory "${3dgs_cpp_root_BINARY_DIR}/shaders/"
+             COMMAND ${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE} "--target-env" "vulkan1.2" -V ${GLSL} -o ${SPIRV} ${GLSLC_DEFINE}
+             DEPENDS ${GLSL})
+     list(APPEND SPIRV_BINARY_FILES ${SPIRV})
