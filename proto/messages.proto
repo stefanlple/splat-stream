@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package splatstream;
+
+message Hello {
+    uint32 version = 1;
+}
+
+message Welcome {
+    uint32 client_id = 1;
+    uint32 udp_port = 2;
+}
+
+message Ping {
+    uint64 id = 1;
+    uint64 client_time_us = 2;
+}
+
+message Pong {
+    uint64 id = 1;
+    uint64 client_time_us = 2;
+}
+
+// everything sent over tcp is wrapped in this
+message Message {
+    oneof payload {
+        Hello hello = 1;
+        Welcome welcome = 2;
+        Ping ping = 3;
+        Pong pong = 4;
+    }
+}
+
+// sent alone over udp, one per datagram
+message CameraUpdate {
+    uint32 client_id = 1;
+    uint32 sequence = 2;
+    float x = 3;
+    float y = 4;
+    float z = 5;
+    float qw = 6;
+    float qx = 7;
+    float qy = 8;
+    float qz = 9;
+}
