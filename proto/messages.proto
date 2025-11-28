@@ -21,6 +21,22 @@ message Pong {
     uint64 client_time_us = 2;
 }
 
+message SceneInfo {
+    uint64 gaussian_count = 1;
+    uint32 sh_degree = 2;
+    uint32 gaussians_per_chunk = 3;
+    uint32 chunk_count = 4;
+}
+
+// data is zstd compressed. uncompressed it holds the chunk's slice of every
+// array in GaussianScene, one after another (positions, scales, rotations,
+// opacities, shDC, shRest)
+message SceneChunk {
+    uint32 index = 1;
+    uint32 raw_size = 2;
+    bytes data = 3;
+}
+
 // everything sent over tcp is wrapped in this
 message Message {
     oneof payload {
@@ -28,6 +44,8 @@ message Message {
         Welcome welcome = 2;
         Ping ping = 3;
         Pong pong = 4;
+        SceneInfo scene_info = 5;
+        SceneChunk scene_chunk = 6;
     }
 }
 

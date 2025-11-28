@@ -86,14 +86,59 @@ RttStats Client::takeRttStats() {
     return stats;
 }
 
+void Client::fail(const std::string& message) {
+    {
+        std::lock_guard lock(sceneMutex);
+        if (errorMessage.empty()) errorMessage = message;
+    }
+    asio::error_code ec;
+    tcpSocket.close(ec);
+    isConnected = false;
+    pingTimer.cancel();
+}
+
+std::string Client::error() {
+    std::lock_guard lock(sceneMutex);
+    return errorMessage;
+}
+
+GaussianScene Client::takeScene() {
+    std::lock_guard lock(sceneMutex);
+    return std::move(receiver.scene);
+}
+
+void Client::sceneProgress(size_t& chunksDone, size_t& chunkCount, size_t& compressedBytes) {
+    std::lock_guard lock(sceneMutex);
+    chunksDone = receiver.chunksDone();
+    chunkCount = receiver.chunkCount();
+    compressedBytes = receiver.compressedBytes();
+}
+
+double Client::sceneTransferMs() {
+    std::lock_guard lock(sceneMutex);
+    return std::chrono::duration<double, std::milli>(sceneEnd - sceneStart).count();
+}
+
+bool Client::handleScene(const splatstream::Message& message) {
+    std::lock_guard lock(sceneMutex);
+    if (message.has_scene_info()) {
+        sceneStart = std::chrono::steady_clock::now();
+        return receiver.start(message.scene_info());
+    }
+    if (!receiver.addChunk(message.scene_chunk())) return false;
+    if (receiver.complete()) {
+        sceneEnd = std::chrono::steady_clock::now();
+        isSceneComplete = true;
+    }
+    return true;
+}
+
 void Client::readHeader() {
     asio::async_read(tcpSocket, asio::buffer(header), [this](asio::error_code ec, size_t) {
-        uint32_t size = ec ? 0 : decodeLength(header);
-        if (size == 0) {
-            isConnected = false;
-            pingTimer.cancel();
-            return;
-        }
+        if (ec == asio::error::operation_aborted) return;  // we closed it ourselves
+        if (ec) return fail("connection closed by server");
+        uint32_t size = decodeLength(header);
+        if (size == 0) return fail("server sent a bad message length");
         readBody(size);
     });
 }
@@ -101,13 +146,14 @@ void Client::readHeader() {
 void Client::readBody(uint32_t size) {
     body.resize(size);
     asio::async_read(tcpSocket, asio::buffer(body), [this](asio::error_code ec, size_t) {
+        if (ec == asio::error::operation_aborted) return;  // we closed it ourselves
+        if (ec) return fail("connection closed by server");
         splatstream::Message message;
-        if (ec || !decodeMessage(body.data(), body.size(), message)) {
-            isConnected = false;
-            pingTimer.cancel();
-            return;
-        }
-        if (message.has_pong()) {
+        if (!decodeMessage(body.data(), body.size(), message)) return fail("server sent a malformed message");
+
+        if (message.has_scene_info() || message.has_scene_chunk()) {
+            if (!handleScene(message)) return fail("server sent invalid scene data");
+        } else if (message.has_pong()) {
             double ms = (nowMicros() - message.pong().client_time_us()) / 1000.0;
             std::lock_guard lock(rttMutex);
             rtts.push_back(ms);

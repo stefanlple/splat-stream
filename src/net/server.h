@@ -7,6 +7,8 @@
 #include <mutex>
 #include <vector>
 
+#include "protocol/scene_stream.h"
+
 struct CameraState {
     uint32_t sequence = 0;
     uint64_t updates = 0;
@@ -18,7 +20,8 @@ class Session;
 
 class Server {
 public:
-    Server(asio::io_context& io, uint16_t tcpPort, uint16_t udpPort);
+    Server(asio::io_context& io, uint16_t tcpPort, uint16_t udpPort,
+           std::shared_ptr<const PreparedScene> scene = nullptr);
 
     uint16_t tcpPort() const;
     uint16_t udpPort() const;
@@ -33,6 +36,7 @@ private:
     void receiveCamera();
     void removeSession(uint32_t id);
 
+    std::shared_ptr<const PreparedScene> scene;
     asio::io_context& io;
     asio::ip::tcp::acceptor acceptor;
     asio::ip::udp::socket udpSocket;

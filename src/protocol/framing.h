@@ -6,7 +6,7 @@
 #include "messages.pb.h"
 
 const uint32_t kProtocolVersion = 1;
-const uint32_t kMaxMessageSize = 1024 * 1024;
+const uint32_t kMaxMessageSize = 4 * 1024 * 1024;
 
 // 4 byte big endian length followed by the serialized message
 std::string encodeMessage(const splatstream::Message& message);

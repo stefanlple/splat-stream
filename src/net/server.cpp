@@ -93,6 +93,11 @@ private:
             reply.mutable_welcome()->set_udp_port(server.udpPort());
             send(reply);
             std::cout << "client " << id << " connected from " << address.to_string() << "\n";
+
+            if (server.scene) {
+                sendFrame(server.scene->info);
+                for (auto& chunk : server.scene->chunks) sendFrame(chunk);
+            }
             return true;
         }
 
@@ -106,12 +111,17 @@ private:
     }
 
     void send(const splatstream::Message& message) {
-        outbox.push_back(encodeMessage(message));
+        sendFrame(std::make_shared<const std::string>(encodeMessage(message)));
+    }
+
+    // frames are shared, so sending the scene to many clients doesn't copy it
+    void sendFrame(std::shared_ptr<const std::string> frame) {
+        outbox.push_back(std::move(frame));
         if (outbox.size() == 1) writeNext();
     }
 
     void writeNext() {
-        asio::async_write(socket, asio::buffer(outbox.front()), [self = shared_from_this()](asio::error_code ec, size_t) {
+        asio::async_write(socket, asio::buffer(*outbox.front()), [self = shared_from_this()](asio::error_code ec, size_t) {
             if (ec) return self->close();
             self->outbox.pop_front();
             if (!self->outbox.empty()) self->writeNext();
@@ -123,13 +133,14 @@ private:
     asio::steady_timer timer;
     uint8_t header[4];
     std::vector<char> body;
-    std::deque<std::string> outbox;
+    std::deque<std::shared_ptr<const std::string>> outbox;
     bool greeted = false;
     bool closed = false;
 };
 
-Server::Server(asio::io_context& io, uint16_t tcpPort, uint16_t udpPort)
-    : io(io),
+Server::Server(asio::io_context& io, uint16_t tcpPort, uint16_t udpPort, std::shared_ptr<const PreparedScene> scene)
+    : scene(std::move(scene)),
+      io(io),
       acceptor(io, tcp::endpoint(tcp::v4(), tcpPort)),
       udpSocket(io, udp::endpoint(udp::v4(), udpPort)) {
     acceptNext();

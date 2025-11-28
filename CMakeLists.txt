@@ -26,12 +26,18 @@ set_target_properties(viewer PROPERTIES BUILD_RPATH ${VULKAN_LIB_DIR})
 
 find_package(Protobuf CONFIG REQUIRED)
 find_path(ASIO_INCLUDE_DIR asio.hpp REQUIRED)
+find_package(zstd CONFIG REQUIRED)
 
-add_library(protocol proto/messages.proto src/protocol/framing.cpp)
+add_library(compression src/compression/zstd_codec.cpp)
+target_include_directories(compression PUBLIC src)
+target_link_libraries(compression PRIVATE zstd::libzstd)
+target_compile_options(compression PRIVATE -Wall -Wextra)
+
+add_library(protocol proto/messages.proto src/protocol/framing.cpp src/protocol/scene_stream.cpp)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/generated)
 protobuf_generate(TARGET protocol IMPORT_DIRS proto PROTOC_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_include_directories(protocol PUBLIC src ${CMAKE_CURRENT_BINARY_DIR}/generated)
-target_link_libraries(protocol PUBLIC protobuf::libprotobuf)
+target_link_libraries(protocol PUBLIC protobuf::libprotobuf scene PRIVATE compression)
 
 add_library(net src/net/server.cpp src/net/client.cpp)
 target_include_directories(net PUBLIC ${ASIO_INCLUDE_DIR})
@@ -39,7 +45,8 @@ target_link_libraries(net PUBLIC protocol)
 target_compile_options(net PRIVATE -Wall -Wextra)
 
 add_executable(server apps/server/main.cpp)
-target_link_libraries(server PRIVATE net)
+target_link_libraries(server PRIVATE net scene)
 
 add_executable(client apps/client/main.cpp)
-target_link_libraries(client PRIVATE net)
+target_link_libraries(client PRIVATE net render)
+set_target_properties(client PROPERTIES BUILD_RPATH ${VULKAN_LIB_DIR})

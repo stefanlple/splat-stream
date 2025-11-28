@@ -9,6 +9,8 @@
 #include <thread>
 #include <vector>
 
+#include "protocol/scene_stream.h"
+
 struct RttStats {
     size_t count = 0;
     double minMs = 0;
@@ -34,11 +36,20 @@ public:
     // rtt measurements since the last call
     RttStats takeRttStats();
 
+    bool sceneComplete() const { return isSceneComplete; }
+    // only valid once sceneComplete() is true
+    GaussianScene takeScene();
+    void sceneProgress(size_t& chunksDone, size_t& chunkCount, size_t& compressedBytes);
+    double sceneTransferMs();
+    std::string error();
+
 private:
     void readHeader();
     void readBody(uint32_t size);
     void schedulePing();
     void writeNext();
+    void fail(const std::string& message);
+    bool handleScene(const splatstream::Message& message);
 
     asio::io_context io;
     asio::ip::tcp::socket tcpSocket;
@@ -58,4 +69,10 @@ private:
 
     std::mutex rttMutex;
     std::vector<double> rtts;
+
+    std::mutex sceneMutex;
+    SceneReceiver receiver;
+    std::atomic<bool> isSceneComplete{false};
+    std::chrono::steady_clock::time_point sceneStart, sceneEnd;
+    std::string errorMessage;
 };
