@@ -12,13 +12,14 @@ Client::Client() : tcpSocket(io), udpSocket(io), pingTimer(io) {}
 
 Client::~Client() { disconnect(); }
 
-void Client::connect(const std::string& host, uint16_t port) {
+void Client::connect(const std::string& host, uint16_t port, bool video) {
     tcp::resolver resolver(io);
     asio::connect(tcpSocket, resolver.resolve(host, std::to_string(port)));
     tcpSocket.set_option(tcp::no_delay(true));
 
     splatstream::Message hello;
     hello.mutable_hello()->set_version(kProtocolVersion);
+    hello.mutable_hello()->set_video(video);
     asio::write(tcpSocket, asio::buffer(encodeMessage(hello)));
 
     asio::read(tcpSocket, asio::buffer(header));
@@ -66,6 +67,7 @@ void Client::sendCamera(const float position[3], const float rotation[4]) {
     update.set_qx(rotation[1]);
     update.set_qy(rotation[2]);
     update.set_qz(rotation[3]);
+    update.set_client_time_us(nowMicros());
 
     asio::error_code ec;
     udpSocket.send_to(asio::buffer(update.SerializeAsString()), serverUdp, 0, ec);
@@ -100,6 +102,14 @@ void Client::fail(const std::string& message) {
 std::string Client::error() {
     std::lock_guard lock(sceneMutex);
     return errorMessage;
+}
+
+bool Client::takeVideoFrame(splatstream::VideoFrame& out) {
+    std::lock_guard lock(videoMutex);
+    if (videoFrames.empty()) return false;
+    out = std::move(videoFrames.front());
+    videoFrames.pop_front();
+    return true;
 }
 
 GaussianScene Client::takeScene() {
@@ -153,6 +163,9 @@ void Client::readBody(uint32_t size) {
 
         if (message.has_scene_info() || message.has_scene_chunk()) {
             if (!handleScene(message)) return fail("server sent invalid scene data");
+        } else if (message.has_video_frame()) {
+            std::lock_guard lock(videoMutex);
+            videoFrames.push_back(std::move(*message.mutable_video_frame()));
         } else if (message.has_pong()) {
             double ms = (nowMicros() - message.pong().client_time_us()) / 1000.0;
             std::lock_guard lock(rttMutex);

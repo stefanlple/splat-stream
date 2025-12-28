@@ -14,6 +14,7 @@ struct CameraState {
     uint64_t updates = 0;
     float position[3] = {0, 0, 0};
     float rotation[4] = {1, 0, 0, 0};
+    uint64_t clientTimeUs = 0;
 };
 
 class Session;
@@ -28,6 +29,11 @@ public:
     size_t clientCount();
     std::vector<std::pair<uint32_t, CameraState>> cameras();
     void stop();
+
+    // video mode: the server renders for one client at a time, the first one that asked for video
+    bool videoClient(uint32_t& id, CameraState& camera);
+    void sendFrame(uint32_t id, std::shared_ptr<const std::string> frame);
+    size_t queuedFrames(uint32_t id);
 
 private:
     friend class Session;

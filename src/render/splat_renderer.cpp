@@ -55,3 +55,23 @@ SplatRenderer::~SplatRenderer() = default;
 void SplatRenderer::run() {
     splatting->start();
 }
+
+OffscreenRenderer::OffscreenRenderer(const GaussianScene& scene, int width, int height)
+    : frameWidth(width), frameHeight(height) {
+    VulkanSplatting::RendererConfiguration config;
+    config.enableGui = false;
+    config.window = VulkanSplatting::createHeadlessWindow(width, height);
+    config.numVertices = static_cast<uint32_t>(scene.count());
+    config.fillVertices = [&scene](float* out) { packVertices(scene, out); };
+    config.onFrame = [this](const uint8_t* bgra, uint32_t, uint32_t) { frame = bgra; };
+    splatting = std::make_unique<VulkanSplatting>(config);
+    splatting->initialize();
+}
+
+OffscreenRenderer::~OffscreenRenderer() = default;
+
+const uint8_t* OffscreenRenderer::render(const float position[3], const float rotation[4]) {
+    splatting->setCamera(position[0], position[1], position[2], rotation[0], rotation[1], rotation[2], rotation[3]);
+    splatting->draw();
+    return frame;
+}

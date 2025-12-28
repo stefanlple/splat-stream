@@ -24,7 +24,7 @@ public:
     ~Client();
 
     // blocks until the server sent its welcome, throws on failure
-    void connect(const std::string& host, uint16_t port);
+    void connect(const std::string& host, uint16_t port, bool video = false);
     void disconnect();
 
     bool connected() const { return isConnected; }
@@ -42,6 +42,9 @@ public:
     void sceneProgress(size_t& chunksDone, size_t& chunkCount, size_t& compressedBytes);
     double sceneTransferMs();
     std::string error();
+
+    // video mode: frames in the order they arrived
+    bool takeVideoFrame(splatstream::VideoFrame& out);
 
 private:
     void readHeader();
@@ -75,4 +78,7 @@ private:
     std::atomic<bool> isSceneComplete{false};
     std::chrono::steady_clock::time_point sceneStart, sceneEnd;
     std::string errorMessage;
+
+    std::mutex videoMutex;
+    std::deque<splatstream::VideoFrame> videoFrames;
 };

@@ -4,6 +4,8 @@ package splatstream;
 
 message Hello {
     uint32 version = 1;
+    // true: server renders and streams video. false: server sends the scene
+    bool video = 2;
 }
 
 message Welcome {
@@ -37,6 +39,17 @@ message SceneChunk {
     bytes data = 3;
 }
 
+// one h264 frame. camera_* tell the client which camera update was rendered,
+// so it can measure input to display latency with its own clock
+message VideoFrame {
+    uint32 frame_id = 1;
+    uint32 camera_sequence = 2;
+    uint64 camera_time_us = 3;
+    uint32 render_us = 4;
+    uint32 encode_us = 5;
+    bytes data = 6;
+}
+
 // everything sent over tcp is wrapped in this
 message Message {
     oneof payload {
@@ -46,6 +59,7 @@ message Message {
         Pong pong = 4;
         SceneInfo scene_info = 5;
         SceneChunk scene_chunk = 6;
+        VideoFrame video_frame = 7;
     }
 }
 
@@ -60,4 +74,5 @@ message CameraUpdate {
     float qx = 7;
     float qy = 8;
     float qz = 9;
+    uint64 client_time_us = 10;
 }

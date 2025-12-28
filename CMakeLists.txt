@@ -33,6 +33,14 @@ target_include_directories(compression PUBLIC src)
 target_link_libraries(compression PRIVATE zstd::libzstd)
 target_compile_options(compression PRIVATE -Wall -Wextra)
 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
+
+add_library(video src/video/video_encoder.cpp src/video/video_decoder.cpp)
+target_include_directories(video PUBLIC src)
+target_link_libraries(video PRIVATE PkgConfig::FFMPEG)
+target_compile_options(video PRIVATE -Wall -Wextra)
+
 add_library(protocol proto/messages.proto src/protocol/framing.cpp src/protocol/scene_stream.cpp)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/generated)
 protobuf_generate(TARGET protocol IMPORT_DIRS proto PROTOC_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
@@ -45,8 +53,10 @@ target_link_libraries(net PUBLIC protocol)
 target_compile_options(net PRIVATE -Wall -Wextra)
 
 add_executable(server apps/server/main.cpp)
-target_link_libraries(server PRIVATE net scene)
+target_link_libraries(server PRIVATE net scene render video)
+set_target_properties(server PROPERTIES BUILD_RPATH ${VULKAN_LIB_DIR})
 
 add_executable(client apps/client/main.cpp)
-target_link_libraries(client PRIVATE net render)
+find_package(OpenGL REQUIRED)
+target_link_libraries(client PRIVATE net render video glfw glm::glm-header-only OpenGL::GL)
 set_target_properties(client PROPERTIES BUILD_RPATH ${VULKAN_LIB_DIR})

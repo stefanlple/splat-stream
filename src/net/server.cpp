@@ -1,5 +1,6 @@
 #include "server.h"
 
+#include <atomic>
 #include <deque>
 #include <iostream>
 
@@ -38,8 +39,17 @@ public:
         asio::post(socket.get_executor(), [self = shared_from_this()] { self->close(); });
     }
 
+    // can be called from any thread
+    void post(std::shared_ptr<const std::string> frame) {
+        asio::post(socket.get_executor(), [self = shared_from_this(), frame = std::move(frame)]() mutable {
+            if (!self->closed) self->sendFrame(std::move(frame));
+        });
+    }
+
     const uint32_t id;
     asio::ip::address address;
+    std::atomic<bool> wantsVideo{false};
+    std::atomic<size_t> queued{0};
     std::mutex cameraMutex;
     CameraState camera;
 
@@ -88,13 +98,15 @@ private:
                 return false;
             }
             greeted = true;
+            wantsVideo = message.hello().video();
             splatstream::Message reply;
             reply.mutable_welcome()->set_client_id(id);
             reply.mutable_welcome()->set_udp_port(server.udpPort());
             send(reply);
-            std::cout << "client " << id << " connected from " << address.to_string() << "\n";
+            std::cout << "client " << id << " connected from " << address.to_string()
+                      << (wantsVideo ? " (video)" : " (scene)") << "\n";
 
-            if (server.scene) {
+            if (server.scene && !wantsVideo) {
                 sendFrame(server.scene->info);
                 for (auto& chunk : server.scene->chunks) sendFrame(chunk);
             }
@@ -117,6 +129,7 @@ private:
     // frames are shared, so sending the scene to many clients doesn't copy it
     void sendFrame(std::shared_ptr<const std::string> frame) {
         outbox.push_back(std::move(frame));
+        queued = outbox.size();
         if (outbox.size() == 1) writeNext();
     }
 
@@ -124,6 +137,7 @@ private:
         asio::async_write(socket, asio::buffer(*outbox.front()), [self = shared_from_this()](asio::error_code ec, size_t) {
             if (ec) return self->close();
             self->outbox.pop_front();
+            self->queued = self->outbox.size();
             if (!self->outbox.empty()) self->writeNext();
         });
     }
@@ -211,11 +225,37 @@ void Server::receiveCamera() {
                     camera.rotation[1] = update.qx();
                     camera.rotation[2] = update.qy();
                     camera.rotation[3] = update.qz();
+                    camera.clientTimeUs = update.client_time_us();
                 }
             }
         }
         receiveCamera();
     });
+}
+
+bool Server::videoClient(uint32_t& id, CameraState& camera) {
+    std::lock_guard lock(mutex);
+    for (auto& [sessionId, session] : sessions) {
+        if (session->wantsVideo) {
+            id = sessionId;
+            std::lock_guard cameraLock(session->cameraMutex);
+            camera = session->camera;
+            return true;
+        }
+    }
+    return false;
+}
+
+void Server::sendFrame(uint32_t id, std::shared_ptr<const std::string> frame) {
+    std::lock_guard lock(mutex);
+    auto it = sessions.find(id);
+    if (it != sessions.end()) it->second->post(std::move(frame));
+}
+
+size_t Server::queuedFrames(uint32_t id) {
+    std::lock_guard lock(mutex);
+    auto it = sessions.find(id);
+    return it == sessions.end() ? 0 : it->second->queued.load();
 }
 
 void Server::removeSession(uint32_t id) {

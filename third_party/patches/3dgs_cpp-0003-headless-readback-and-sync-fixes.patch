@@ -1,0 +1,334 @@
+diff --git a/include/3dgs/3dgs.h b/include/3dgs/3dgs.h
+index fd70505..2987883 100644
+--- a/include/3dgs/3dgs.h
++++ b/include/3dgs/3dgs.h
+@@ -23,6 +23,9 @@ public:
+         uint32_t numVertices = 0;
+         std::function<void(float*)> fillVertices;
+ 
++        // if set (and enableGui is false), called after every frame with the rendered image as BGRA
++        std::function<void(const uint8_t* bgra, uint32_t width, uint32_t height)> onFrame;
++
+         float fov = 45.0f;
+         float near = 0.2f;
+         float far = 1000.0f;
+@@ -37,6 +40,8 @@ public:
+     static std::shared_ptr<Window> createGlfwWindow(std::string name, int width, int height);
+ #endif
+ 
++static std::shared_ptr<Window> createHeadlessWindow(int width, int height);
++
+ #ifdef VKGS_ENABLE_METAL
+     static std::shared_ptr<Window> createMetalWindow(void *caMetalLayer, int width, int height);
+ #endif
+@@ -51,6 +56,9 @@ public:
+ 
+     void logMovement(float x, float y, float z);
+ 
++    // rotation is a (w, x, y, z) quaternion
++    void setCamera(float x, float y, float z, float qw, float qx, float qy, float qz);
++
+     void stop();
+ private:
+     RendererConfiguration configuration;
+diff --git a/src/3dgs.cpp b/src/3dgs.cpp
+index 9480a28..052c704 100644
+--- a/src/3dgs.cpp
++++ b/src/3dgs.cpp
+@@ -1,5 +1,6 @@
+ #include "3dgs.h"
+ #include "Renderer.h"
++#include "vulkan/windowing/HeadlessWindow.h"
+ 
+ #ifdef VKGS_ENABLE_GLFW
+ #include "vulkan/windowing/GLFWWindow.h"
+@@ -22,6 +23,15 @@ void VulkanSplatting::start() {
+     renderer->run();
+ }
+ 
++std::shared_ptr<Window> VulkanSplatting::createHeadlessWindow(int width, int height) {
++    return std::make_shared<HeadlessWindow>(width, height);
++}
++
++void VulkanSplatting::setCamera(float x, float y, float z, float qw, float qx, float qy, float qz) {
++    renderer->camera.position = glm::vec3(x, y, z);
++    renderer->camera.rotation = glm::quat(qw, qx, qy, qz);
++}
++
+ void VulkanSplatting::initialize() {
+     renderer = std::make_shared<Renderer>(configuration);
+     renderer->initialize();
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 4476934..e649321 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -16,7 +16,8 @@ file(GLOB SOURCE
+         *.cpp
+         vulkan/*.cpp
+         vulkan/pipelines/*.cpp
+-        vulkan/windowing/GLFWWindow.cpp)
++        vulkan/windowing/GLFWWindow.cpp
++        vulkan/windowing/HeadlessWindow.cpp)
+ 
+ # Remove DummyGUIManager.cpp from source list
+ list(REMOVE_ITEM SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/DummyGUIManager.cpp)
+diff --git a/src/Renderer.cpp b/src/Renderer.cpp
+index c724795..9e9f0c1 100644
+--- a/src/Renderer.cpp
++++ b/src/Renderer.cpp
+@@ -28,6 +28,18 @@ void Renderer::initialize() {
+     createRenderPipeline();
+     createCommandPool();
+     recordPreprocessCommandBuffer();
++
++    if (configuration.onFrame) {
++        if (swapchain->swapchainFormat != vk::Format::eB8G8R8A8Unorm) {
++            throw std::runtime_error("frame readback needs a B8G8R8A8 swapchain");
++        }
++        auto [width, height] = swapchain->swapchainExtent;
++        readbackBuffer = std::make_shared<Buffer>(context, width * height * 4, vk::BufferUsageFlagBits::eTransferDst,
++                                                  VMA_MEMORY_USAGE_AUTO,
++                                                  VMA_ALLOCATION_CREATE_MAPPED_BIT |
++                                                  VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
++                                                  false);
++    }
+ }
+ 
+ void Renderer::handleInput() {
+@@ -427,6 +439,17 @@ startOfRenderLoop:
+     } else if (ret != vk::Result::eSuccess) {
+         throw std::runtime_error("Failed to present swapchain image");
+     }
++
++    if (configuration.onFrame) {
++        ret = context->device->waitForFences(inflightFences[0].get(), VK_TRUE, UINT64_MAX);
++        if (ret != vk::Result::eSuccess) {
++            throw std::runtime_error("Failed to wait for fence");
++        }
++        // the readback memory is cached, so drop stale cpu cache lines before reading it
++        vmaInvalidateAllocation(context->allocator, readbackBuffer->allocation, 0, VK_WHOLE_SIZE);
++        auto [width, height] = swapchain->swapchainExtent;
++        configuration.onFrame(static_cast<const uint8_t*>(readbackBuffer->allocation_info.pMappedData), width, height);
++    }
+ }
+ 
+ void Renderer::run() {
+@@ -543,6 +566,18 @@ void Renderer::recordPreprocessCommandBuffer() {
+                                             &totalSumRegion);
+     }
+ 
++    // make the instance count visible to the cpu before recordRenderCommandBuffer reads it,
++    // otherwise it can read the previous frame's value
++    vk::BufferMemoryBarrier hostBarrier{};
++    hostBarrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
++    hostBarrier.dstAccessMask = vk::AccessFlagBits::eHostRead;
++    hostBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++    hostBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++    hostBarrier.buffer = totalSumBufferHost->buffer;
++    hostBarrier.size = VK_WHOLE_SIZE;
++    preprocessCommandBuffer->pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eHost,
++                                             {}, nullptr, hostBarrier, nullptr);
++
+     preprocessCommandBuffer->writeTimestamp(vk::PipelineStageFlagBits::eComputeShader, context->queryPool.get(),
+                                         queryManager->registerQuery("prefix_sum_end"));
+ 
+@@ -609,6 +644,9 @@ bool Renderer::recordRenderCommandBuffer(uint32_t currentFrame) {
+     renderCommandBuffer->dispatch(numGroups, 1, 1);
+ 
+     sortKBufferEven->computeWriteReadBarrier(renderCommandBuffer.get());
++    // preprocess_sort writes the values too. MoltenVK only syncs the buffers named in a barrier,
++    // so without this the first sort pass can read values left over from earlier frames
++    sortVBufferEven->computeWriteReadBarrier(renderCommandBuffer.get());
+     renderCommandBuffer->writeTimestamp(vk::PipelineStageFlagBits::eComputeShader, context->queryPool.get(),
+                                             queryManager->registerQuery("preprocess_sort_end"));
+ 
+@@ -692,7 +730,8 @@ bool Renderer::recordRenderCommandBuffer(uint32_t currentFrame) {
+     imageMemoryBarrier.dstAccessMask = vk::AccessFlagBits::eShaderWrite;
+     imageMemoryBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+     imageMemoryBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+-    renderCommandBuffer->pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe,
++    // src stage has to match the stage the acquire semaphore is waited on
++    renderCommandBuffer->pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+                                          vk::PipelineStageFlagBits::eComputeShader,
+                                          vk::DependencyFlagBits::eByRegion, nullptr, nullptr, imageMemoryBarrier);
+ 
+@@ -710,6 +749,36 @@ bool Renderer::recordRenderCommandBuffer(uint32_t currentFrame) {
+         renderCommandBuffer->pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+                                              vk::PipelineStageFlagBits::eColorAttachmentOutput,
+                                              vk::DependencyFlagBits::eByRegion, nullptr, nullptr, imageMemoryBarrier);
++    } else if (configuration.onFrame) {
++        imageMemoryBarrier.newLayout = vk::ImageLayout::eTransferSrcOptimal;
++        imageMemoryBarrier.dstAccessMask = vk::AccessFlagBits::eTransferRead;
++        renderCommandBuffer->pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
++                                             vk::PipelineStageFlagBits::eTransfer,
++                                             vk::DependencyFlagBits::eByRegion, nullptr, nullptr, imageMemoryBarrier);
++
++        vk::BufferImageCopy region{};
++        region.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
++        region.imageExtent = vk::Extent3D{width, height, 1};
++        renderCommandBuffer->copyImageToBuffer(swapchain->swapchainImages[currentImageIndex]->image,
++                                               vk::ImageLayout::eTransferSrcOptimal, readbackBuffer->buffer, region);
++
++        vk::BufferMemoryBarrier hostBarrier{};
++        hostBarrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
++        hostBarrier.dstAccessMask = vk::AccessFlagBits::eHostRead;
++        hostBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++        hostBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++        hostBarrier.buffer = readbackBuffer->buffer;
++        hostBarrier.size = VK_WHOLE_SIZE;
++        renderCommandBuffer->pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eHost,
++                                             {}, nullptr, hostBarrier, nullptr);
++
++        imageMemoryBarrier.oldLayout = vk::ImageLayout::eTransferSrcOptimal;
++        imageMemoryBarrier.srcAccessMask = vk::AccessFlagBits::eTransferRead;
++        imageMemoryBarrier.newLayout = vk::ImageLayout::ePresentSrcKHR;
++        imageMemoryBarrier.dstAccessMask = vk::AccessFlagBits::eMemoryRead;
++        renderCommandBuffer->pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
++                                             vk::PipelineStageFlagBits::eBottomOfPipe,
++                                             vk::DependencyFlagBits::eByRegion, nullptr, nullptr, imageMemoryBarrier);
+     } else {
+         imageMemoryBarrier.newLayout = vk::ImageLayout::ePresentSrcKHR;
+         imageMemoryBarrier.dstAccessMask = vk::AccessFlagBits::eMemoryRead;
+diff --git a/src/Renderer.h b/src/Renderer.h
+index ee7ceae..495e4de 100644
+--- a/src/Renderer.h
++++ b/src/Renderer.h
+@@ -102,6 +102,7 @@ private:
+     std::shared_ptr<ComputePipeline> tileBoundaryPipeline;
+ 
+     std::shared_ptr<Buffer> uniformBuffer;
++    std::shared_ptr<Buffer> readbackBuffer;
+     std::shared_ptr<Buffer> vertexAttributeBuffer;
+     std::shared_ptr<Buffer> tileOverlapBuffer;
+     std::shared_ptr<Buffer> prefixSumPingBuffer;
+diff --git a/src/vulkan/Buffer.cpp b/src/vulkan/Buffer.cpp
+index a55ada8..4b1d71a 100644
+--- a/src/vulkan/Buffer.cpp
++++ b/src/vulkan/Buffer.cpp
+@@ -78,6 +78,8 @@ void Buffer::upload(const void* data, uint32_t size, uint32_t offset) {
+         context->endOneTimeCommandBuffer(std::move(commandBuffer), VulkanContext::Queue::COMPUTE);
+     } else if (flags & VMA_ALLOCATION_CREATE_MAPPED_BIT) {
+         memcpy(allocation_info.pMappedData, ((char *) data) + offset, size);
++        // host-cached memory may not be coherent: without a flush the gpu can see old data
++        vmaFlushAllocation(context->allocator, allocation, offset, size);
+     } else {
+         throw std::runtime_error("Buffer is not mappable");
+     }
+@@ -193,19 +195,24 @@ void Buffer::assertEquals(char* data, size_t length) {
+     }
+ }
+ 
++// Global memory barriers instead of per-buffer ones: on MoltenVK the per-buffer barriers
++// did not reliably order the compute passes (frames showed data from the two previous
++// frames). They also cover transfer, since some of these sit next to buffer copies.
++static void globalBarrier(vk::CommandBuffer commandBuffer, vk::AccessFlags src, vk::AccessFlags dst) {
++    vk::MemoryBarrier barrier{src, dst};
++    commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eTransfer,
++                                  vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eTransfer,
++                                  {}, barrier, nullptr, nullptr);
++}
++
+ void Buffer::computeWriteReadBarrier(vk::CommandBuffer commandBuffer) {
+-    Utils::BarrierBuilder().queueFamilyIndex(context->queues[VulkanContext::Queue::COMPUTE].queueFamily)
+-            .addBufferBarrier(shared_from_this(), vk::AccessFlagBits::eShaderWrite, vk::AccessFlagBits::eShaderRead)
+-            .build(commandBuffer, vk::PipelineStageFlagBits::eComputeShader,
+-                   vk::PipelineStageFlagBits::eComputeShader);
++    globalBarrier(commandBuffer, vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferWrite,
++                  vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eTransferRead);
+ }
+ 
+ void Buffer::computeReadWriteBarrier(vk::CommandBuffer commandBuffer) {
+-    Utils::BarrierBuilder().queueFamilyIndex(context->queues[VulkanContext::Queue::COMPUTE].queueFamily)
+-            .addBufferBarrier(shared_from_this(), vk::AccessFlagBits::eShaderRead,
+-                              vk::AccessFlagBits::eShaderWrite)
+-            .build(commandBuffer, vk::PipelineStageFlagBits::eComputeShader,
+-                   vk::PipelineStageFlagBits::eComputeShader);
++    globalBarrier(commandBuffer, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eTransferRead,
++                  vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferWrite);
+ }
+ 
+ void Buffer::computeWriteWriteBarrier(vk::CommandBuffer commandBuffer) {
+diff --git a/src/vulkan/Buffer.h b/src/vulkan/Buffer.h
+index aa62648..942aa57 100644
+--- a/src/vulkan/Buffer.h
++++ b/src/vulkan/Buffer.h
+@@ -53,6 +53,7 @@ public:
+             downloadTo(stagingBuffer, offset, 0);
+             return *static_cast<T *>(stagingBuffer->allocation_info.pMappedData);
+         } else if (flags & VMA_ALLOCATION_CREATE_MAPPED_BIT) {
++            vmaInvalidateAllocation(context->allocator, allocation, offset, sizeof(T));
+             return *(static_cast<T *>(allocation_info.pMappedData) + offset / sizeof(T));
+         } else {
+             throw std::runtime_error("Buffer is not mappable");
+diff --git a/src/vulkan/Swapchain.cpp b/src/vulkan/Swapchain.cpp
+index 30b0ace..62b6c81 100644
+--- a/src/vulkan/Swapchain.cpp
++++ b/src/vulkan/Swapchain.cpp
+@@ -66,7 +66,8 @@ void Swapchain::createSwapchain() {
+     createInfo.imageColorSpace = surfaceFormat.colorSpace;
+     createInfo.imageExtent = extent;
+     createInfo.imageArrayLayers = 1;
+-    createInfo.imageUsage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eStorage;
++    createInfo.imageUsage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eStorage |
++                            vk::ImageUsageFlagBits::eTransferSrc;
+ 
+     std::vector<uint32_t> uniqueQueueFamilies;
+     for (auto& queue: context->queues) {
+diff --git a/src/vulkan/windowing/HeadlessWindow.cpp b/src/vulkan/windowing/HeadlessWindow.cpp
+new file mode 100644
+index 0000000..e5d268f
+--- /dev/null
++++ b/src/vulkan/windowing/HeadlessWindow.cpp
+@@ -0,0 +1,22 @@
++#include "HeadlessWindow.h"
++
++#include "../VulkanContext.h"
++
++VkSurfaceKHR HeadlessWindow::createSurface(std::shared_ptr<VulkanContext> context) {
++    auto instance = static_cast<VkInstance>(context->instance.get());
++    auto create = reinterpret_cast<PFN_vkCreateHeadlessSurfaceEXT>(
++        vkGetInstanceProcAddr(instance, "vkCreateHeadlessSurfaceEXT"));
++    if (!create) {
++        throw std::runtime_error("VK_EXT_headless_surface is not available");
++    }
++    VkHeadlessSurfaceCreateInfoEXT info{VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT};
++    VkSurfaceKHR surface;
++    if (create(instance, &info, nullptr, &surface) != VK_SUCCESS) {
++        throw std::runtime_error("failed to create headless surface");
++    }
++    return surface;
++}
++
++std::vector<std::string> HeadlessWindow::getRequiredInstanceExtensions() {
++    return {VK_KHR_SURFACE_EXTENSION_NAME, VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME};
++}
+diff --git a/src/vulkan/windowing/HeadlessWindow.h b/src/vulkan/windowing/HeadlessWindow.h
+new file mode 100644
+index 0000000..dd1e7d6
+--- /dev/null
++++ b/src/vulkan/windowing/HeadlessWindow.h
+@@ -0,0 +1,24 @@
++#ifndef HEADLESSWINDOW_H
++#define HEADLESSWINDOW_H
++
++#include "../Window.h"
++
++// no window at all, renders into a VK_EXT_headless_surface swapchain
++class HeadlessWindow : public Window {
++public:
++    HeadlessWindow(uint32_t width, uint32_t height) : width(width), height(height) {}
++
++    VkSurfaceKHR createSurface(std::shared_ptr<VulkanContext> context) override;
++
++    std::vector<std::string> getRequiredInstanceExtensions() override;
++
++    [[nodiscard]] std::pair<uint32_t, uint32_t> getFramebufferSize() const override { return {width, height}; }
++
++    bool tick() override { return true; }
++
++private:
++    uint32_t width;
++    uint32_t height;
++};
++
++#endif //HEADLESSWINDOW_H
